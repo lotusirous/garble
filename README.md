@@ -95,10 +95,10 @@ Contents are decoded at run time:
 * Files in an `embed.FS` are decoded each time they are opened. Paths, directory
   entries, file sizes, seeking, and `ReadAt` behavior are unchanged.
 
-Embedded variables use the same obfuscation algorithms as source literals.
-Values larger than 2 KiB and `embed.FS` contents share a simpler decoder that
-scales to large files. Decoding adds runtime work; opening files in an `embed.FS`
-also allocates temporary buffers.
+Embedded string and byte-slice variables use the same cipher as source literals,
+whatever their size. Only `embed.FS` contents use a simpler streaming decoder.
+Decoding adds runtime work; opening files in an `embed.FS` also allocates
+temporary buffers.
 
 Embedded filenames remain visible. This is obfuscation, not encryption:
 the executable contains the decoding key, so its contents can still be recovered.

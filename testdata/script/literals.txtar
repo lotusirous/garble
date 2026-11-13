@@ -10,6 +10,8 @@ binsubstr main$exe 'skip typed const' 'skip typed var' 'skip typed var assign' '
 ! binsubstr main$exe 'garbleDecrypt' 'Lorem Ipsum' 'dolor sit amet' 'first assign' 'second assign' 'First Line' 'Second Line' 'secret map value' 'obfuscated with shadowed builtins' '1: literal in' 'an secret array' '2: literal in' 'a secret slice' 'to obfuscate' 'also obfuscate' 'stringTypeField String' 'testMap1 key' 'Obfuscate this block' 'also obfuscate this' 'oversize concat secret' 'parens!!'
 ! binsubstr main$exe 'initialized owner of linked string'
 ! binsubstr main$exe 'append variadic secret payload abcdefghijklmnopqrstuvwxyz' 'copy untyped secret abcdefghijklmnopqrstuvwxyz' 'local option key' 'local option value'
+# A module declaring go 1.12 must compile every decoder garble emits into it.
+! binsubstr main$exe 'oldlang string secret' 'oldlang slice' 'oldlang arr' 'oldlang ptr' 'oldlang sptr' 'oldlang fresh' 'oldlang big chunk 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJ'
 
 [short] stop # checking that the build is reproducible is slow
 
@@ -24,9 +26,10 @@ go build
 exec ./main$exe
 cmp stderr main.stderr
 binsubstr main$exe 'Lorem Ipsum' 'dolor sit amet' 'second assign' 'First Line' 'Second Line' 'secret map value' 'obfuscated with shadowed builtins' '1: literal in' 'an secret array' '2: literal in' 'a secret slice' 'to obfuscate' 'also obfuscate' 'stringTypeField String' 'testMap1 key' 'Obfuscate this block' 'also obfuscate this' 'oversize concat secret'
+binsubstr main$exe 'oldlang string secret' 'oldlang big chunk 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJ'
 
 # Generate and write random literals into a separate file.
-# Huge literals must use the bounded-AST decoder instead of per-byte expressions.
+# Huge literals use the same cipher as any other literal.
 generate-literals extra_literals.go
 
 # ensure we find the extra literals in an unobfuscated build
@@ -41,6 +44,8 @@ exec garble -literals build -tags=literalplugin -ldflags=-dumpdep
 exec ./main$exe
 cmp stderr main.stderr
 ! binsubstr main$exe 'garble_unique_string'
+# Without an embed.FS, no literal uses the blob encoding and its header.
+! binsubstr main$exe 'garble:literal:v1'
 
 # Darwin arm64 uses compiler -shared for normal PIC executables, not just libraries.
 # The other build modes are covered by TestLiteralInitBuildModeCacheIdentity.
@@ -247,6 +252,10 @@ module test/main
 
 go 1.23
 
+require test/oldlang v0.0.0
+
+replace test/oldlang => ./oldlang
+
 -- main.go --
 package main
 
@@ -260,6 +269,7 @@ import (
 	. "test/main/imp_struct"
 	. "test/main/imp_type"
 	. "test/main/imp_var"
+	"test/oldlang"
 )
 
 //go:linkname deadLiteralGlobal deadLiteralGlobal1167
@@ -386,6 +396,8 @@ func main() {
 	println(strSlice[0], strSlice[1])
 	emptyStrSlice := []string{""}
 	print(emptyStrSlice[0])
+
+	oldlang.Print()
 }
 
 type stringType string
@@ -820,6 +832,62 @@ func checkLiteralOwners() {
 	}
 }
 
+-- oldlang/go.mod --
+module test/oldlang
+
+go 1.12
+-- oldlang/p.go --
+package oldlang
+
+var Str = "oldlang string secret"
+
+var Slice = []byte{'o', 'l', 'd', 'l', 'a', 'n', 'g', ' ', 's', 'l', 'i', 'c', 'e'}
+
+// Arrays longer than their literals keep their trailing zeros.
+var Array = [16]byte{'o', 'l', 'd', 'l', 'a', 'n', 'g', ' ', 'a', 'r', 'r'}
+
+var ArrayPtr = &[16]byte{'o', 'l', 'd', 'l', 'a', 'n', 'g', ' ', 'p', 't', 'r'}
+
+var SlicePtr = &[]byte{'o', 'l', 'd', 'l', 'a', 'n', 'g', ' ', 's', 'p', 't', 'r'}
+
+// Fresh returns new storage on every call, even after a caller mutates it.
+func Fresh() []byte {
+	return []byte{'o', 'l', 'd', 'l', 'a', 'n', 'g', ' ', 'f', 'r', 'e', 's', 'h'}
+}
+
+const chunk = "oldlang big chunk 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJ"
+
+// Big folds to one literal over 2 KiB.
+func Big() string {
+	return chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk +
+	chunk + chunk
+}
+
+func Print() {
+	println(Str, string(Slice))
+	println(string(Array[:11]), Array[11], Array[15])
+	println(string(ArrayPtr[:11]), ArrayPtr[15], string(*SlicePtr))
+	b := Fresh()
+	b[0] = 'X'
+	println(string(Fresh()))
+	println(len(Big()), Big()[:16])
+	println(len(Big()), Big()[:16])
+}
 -- main.stderr --
 Lorem Ipsum true
 First Line
@@ -864,3 +932,9 @@ str as dot imported type
 string in dot imported struct
 1: literal in an secret array
 2: literal in a secret slice
+oldlang string secret oldlang slice
+oldlang arr 0 0
+oldlang ptr 0 oldlang sptr
+oldlang fresh
+2176 oldlang big chun
+2176 oldlang big chun

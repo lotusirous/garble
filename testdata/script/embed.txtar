@@ -6,14 +6,14 @@ cd obfuscate
 exec garble -literals build -o app$exe
 exec ./app$exe
 cmp stdout want.stdout
-! binsubstr app$exe 'GARBLE_EMBED_STRING_SECRET_194' 'GARBLE_EMBED_BYTES_SECRET_194' 'GARBLE_FS_SECRET_194' 'GARBLE_RAW_PATTERN_SECRET_194'
+! binsubstr app$exe 'GARBLE_EMBED_STRING_SECRET_194' 'GARBLE_EMBED_BYTES_SECRET_194' 'GARBLE_FS_SECRET_194' 'GARBLE_RAW_PATTERN_SECRET_194' 'GARBLE_EMBED_BIG_SECRET_194'
 
 [short] stop
 
 go build -o app$exe
 exec ./app$exe
 cmp stdout want.stdout
-binsubstr app$exe 'GARBLE_EMBED_STRING_SECRET_194' 'GARBLE_EMBED_BYTES_SECRET_194' 'GARBLE_FS_SECRET_194' 'GARBLE_RAW_PATTERN_SECRET_194'
+binsubstr app$exe 'GARBLE_EMBED_STRING_SECRET_194' 'GARBLE_EMBED_BYTES_SECRET_194' 'GARBLE_FS_SECRET_194' 'GARBLE_RAW_PATTERN_SECRET_194' 'GARBLE_EMBED_BIG_SECRET_194'
 cd ..
 go build
 exec ./main$exe
@@ -88,6 +88,14 @@ var rawPattern string
 //go:embed empty.txt
 var empty string
 
+//go:embed empty.txt
+var emptyBytes []byte
+
+// big is over 2 KiB, the old limit for literal obfuscators.
+//
+//go:embed big.txt
+var big string
+
 //go:embed tiny.txt
 var tiny []byte
 
@@ -115,7 +123,7 @@ type aliasFS = embed.FS
 var aliased aliasFS
 
 func main() {
-	if empty != "" || string(tiny) != "x\n" {
+	if empty != "" || len(emptyBytes) != 0 || string(tiny) != "x\n" {
 		panic("short embed differs")
 	}
 	data, _ := assets.ReadFile("static/a.txt")
@@ -166,10 +174,52 @@ func main() {
 	})
 	fmt.Printf("variables: %s|%s|%s|%s|%s|%s", text, bytes, namedText, aliasedText, namedData, initialized)
 	fmt.Printf("raw: %s", rawPattern)
+	fmt.Printf("big: %d %s\n", len(big), big[:27])
 }
 -- obfuscate/string.txt --
 GARBLE_EMBED_STRING_SECRET_194
 -- obfuscate/empty.txt --
+-- obfuscate/big.txt --
+GARBLE_EMBED_BIG_SECRET_194 begins a large embedded file....
+line 02 of the large embedded file, past the old 2 KiB cap..
+line 03 of the large embedded file, past the old 2 KiB cap..
+line 04 of the large embedded file, past the old 2 KiB cap..
+line 05 of the large embedded file, past the old 2 KiB cap..
+line 06 of the large embedded file, past the old 2 KiB cap..
+line 07 of the large embedded file, past the old 2 KiB cap..
+line 08 of the large embedded file, past the old 2 KiB cap..
+line 09 of the large embedded file, past the old 2 KiB cap..
+line 10 of the large embedded file, past the old 2 KiB cap..
+line 11 of the large embedded file, past the old 2 KiB cap..
+line 12 of the large embedded file, past the old 2 KiB cap..
+line 13 of the large embedded file, past the old 2 KiB cap..
+line 14 of the large embedded file, past the old 2 KiB cap..
+line 15 of the large embedded file, past the old 2 KiB cap..
+line 16 of the large embedded file, past the old 2 KiB cap..
+line 17 of the large embedded file, past the old 2 KiB cap..
+line 18 of the large embedded file, past the old 2 KiB cap..
+line 19 of the large embedded file, past the old 2 KiB cap..
+line 20 of the large embedded file, past the old 2 KiB cap..
+line 21 of the large embedded file, past the old 2 KiB cap..
+line 22 of the large embedded file, past the old 2 KiB cap..
+line 23 of the large embedded file, past the old 2 KiB cap..
+line 24 of the large embedded file, past the old 2 KiB cap..
+line 25 of the large embedded file, past the old 2 KiB cap..
+line 26 of the large embedded file, past the old 2 KiB cap..
+line 27 of the large embedded file, past the old 2 KiB cap..
+line 28 of the large embedded file, past the old 2 KiB cap..
+line 29 of the large embedded file, past the old 2 KiB cap..
+line 30 of the large embedded file, past the old 2 KiB cap..
+line 31 of the large embedded file, past the old 2 KiB cap..
+line 32 of the large embedded file, past the old 2 KiB cap..
+line 33 of the large embedded file, past the old 2 KiB cap..
+line 34 of the large embedded file, past the old 2 KiB cap..
+line 35 of the large embedded file, past the old 2 KiB cap..
+line 36 of the large embedded file, past the old 2 KiB cap..
+line 37 of the large embedded file, past the old 2 KiB cap..
+line 38 of the large embedded file, past the old 2 KiB cap..
+line 39 of the large embedded file, past the old 2 KiB cap..
+line 40 of the large embedded file, past the old 2 KiB cap..
 -- obfuscate/tiny.txt --
 x
 -- obfuscate/bytes.txt --
@@ -210,3 +260,4 @@ variables: GARBLE_EMBED_STRING_SECRET_194
 |GARBLE_EMBED_STRING_SECRET_194
 !
 raw: GARBLE_RAW_PATTERN_SECRET_194
+big: 2440 GARBLE_EMBED_BIG_SECRET_194
