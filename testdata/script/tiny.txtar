@@ -8,6 +8,9 @@ exec garble -tiny -seed=AAAAAAAAAAA build
 ! binsubstr main$exe 'concurrent map writes' 'exit hook invoked exit'
 ! binsubstr main$exe 'sync: unlock of unlocked mutex' 'sync: RUnlock of unlocked RWMutex'
 ! binsubstr main$exe 'crypto/rand: failed to read random data' 'FIPS 140-3 self-test failed'
+# The FIPS module is not obfuscated, so its panic and debug messages name it
+# and its algorithms; they go the way of the fatal ones.
+! binsubstr main$exe 'crypto/aes: internal error: using generic implementation' 'fips: invalid self-test name' 'FIPS 140-3 self-test passed' 'fips140: verified code+data'
 [linux] ! binsubstr main$exe 'impossible cgroup version' 'runtime: cgroup buffer length'
 # Exported function names stay, as callers of runtime.FuncForPC may need them,
 # but only where garble hashed them: the FIPS module is never obfuscated, so

@@ -182,7 +182,6 @@ func stripFatalStringFragments(expr ast.Expr) {
 // packages every such call is a crash diagnostic whose message is throwaway.
 var runtimeFatalCalls = map[string][]string{
 	"runtime":                   {"throw", "fatal"},
-	"crypto/internal/fips140":   {"fatal"},
 	"crypto/internal/sysrand":   {"fatal"},
 	"crypto/rand":               {"fatal"},
 	"internal/runtime/cgroup":   {"throw", "print", "println"},
@@ -192,12 +191,22 @@ var runtimeFatalCalls = map[string][]string{
 	"sync":                      {"throw", "fatal"},
 }
 
+// fipsMessageCalls lists the calls whose string arguments are blanked in tiny
+// mode in every package of the FIPS module. Garble does not obfuscate the
+// module, so its panics and debug prints, not only its fatal errors, would
+// name it and its algorithms. Its one recover discards the value, so no
+// message is read back.
+var fipsMessageCalls = []string{"fatal", "panic", "print", "println"}
+
 // stripFatalMessages blanks the static string fragments passed to the diagnostic
 // functions named for importPath. Non-literal arguments keep being evaluated, so
 // their local uses and side effects are preserved; only the embedded text is
 // removed, and tiny mode already suppresses the runtime's fatal output.
 func stripFatalMessages(importPath string, file *ast.File) {
 	callNames := runtimeFatalCalls[importPath]
+	if importPath == "crypto/internal/fips140" || strings.HasPrefix(importPath, "crypto/internal/fips140/") {
+		callNames = fipsMessageCalls
+	}
 	if callNames == nil {
 		return
 	}
