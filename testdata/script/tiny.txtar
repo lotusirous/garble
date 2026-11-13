@@ -9,6 +9,11 @@ exec garble -tiny -seed=AAAAAAAAAAA build
 ! binsubstr main$exe 'sync: unlock of unlocked mutex' 'sync: RUnlock of unlocked RWMutex'
 ! binsubstr main$exe 'crypto/rand: failed to read random data' 'FIPS 140-3 self-test failed'
 [linux] ! binsubstr main$exe 'impossible cgroup version' 'runtime: cgroup buffer length'
+# Exported function names stay, as callers of runtime.FuncForPC may need them,
+# but only where garble hashed them: the FIPS module is never obfuscated, so
+# its names go. Type arguments spell out struct fields and package paths, so
+# they are stored as "[...]", which is how Go prints them anyway.
+! binsubstr main$exe 'crypto/internal/fips140/aes.(*CTR).XORKeyStream' '[go.shape.int]).Swap'
 ! exec ./main$exe
 stderr '^\(0x[[:xdigit:]]+,0x[[:xdigit:]]+\)' # interfaces/pointers print correctly
 # Tiny binaries have no Go source-file or source-line mappings.
@@ -21,6 +26,8 @@ stderr '^recovered: ya like jazz?'
 stderr '^panic: [0-9a-f]{16}$'
 stderr 'funcExported false funcUnexported true'
 stderr 'funcStructExported false funcStructUnexported true'
+# An exported generic method still has a name.
+stderr '^generic.name [^ ]+\[\.\.\.\]\)\.Swap$'
 # The runtime consumes a handful of function names as data even in -tiny:
 # reflect's call stubs keep their exact names so runtime.stkframe.argMapInternal
 # can select their dynamic GC argument maps, value-method wrappers keep a
@@ -177,6 +184,12 @@ func callNilValueMethod() {
 
 func pcName(pc uintptr) string { return runtime.FuncForPC(pc).Name() }
 
+// pair is generic, so the names of its methods carry type arguments.
+type pair[T any] struct{ a, b T }
+
+//go:noinline
+func (p *pair[T]) Swap() { p.a, p.b = p.b, p.a }
+
 func stackHas(target string) bool {
 	pcs := make([]uintptr, 64)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(0, pcs)])
@@ -309,6 +322,7 @@ func main() {
 	println("single aborts:", childAborts("single"), "crash aborts:", childAborts("crash"))
 
 	checkRuntimeConsumedNames()
+	println("generic.name", pcName(reflect.ValueOf((*pair[int]).Swap).Pointer()))
 
 	// Retain fatal paths which Go 1.26 moved into runtime-linked standard
 	// packages, plus SetFinalizer's computed fatal paths. They must be cleaned
