@@ -116,7 +116,7 @@ func TestSharedStringAdapterBehavior(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := strings.Repeat("first literal second longer literal named literal mutable bytes literal 日本語のliteral global literal secret\n", 3)
-			buildAndRunProbe(t, []byte(text.String()), want)
+			buildAndRunProbe(t, []byte(text.String()), "", want)
 		})
 	}
 }

@@ -113,5 +113,5 @@ func main() {
 	if bytes.Contains(source.Bytes(), []byte(marker)) {
 		t.Fatal("plaintext literal survived")
 	}
-	buildAndRunProbe(t, source.Bytes(), marker+" "+marker+" "+marker+" "+marker+" "+marker+"\n")
+	buildAndRunProbe(t, source.Bytes(), "", marker+" "+marker+" "+marker+" "+marker+" "+marker+"\n")
 }
