@@ -248,3 +248,66 @@ func TestProxyOccupancy(t *testing.T) {
 		})
 	}
 }
+
+// TestOwnerKeyHalvesApart checks that an owner's two key halves never share
+// an allocation. Inline child structs are laid out within their parent, so
+// halves in one allocation can sit next to each other in the binary, where
+// a scan of neighboring words would find the whole key.
+func TestOwnerKeyHalvesApart(t *testing.T) {
+	const source = "package p\nfunc f() string { return \"owner literal secret\" }\n"
+	failures := 0
+	for seed := int64(1); seed <= 200; seed++ {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "owner.go", source, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue), Defs: make(map[*ast.Ident]types.Object), Uses: make(map[*ast.Ident]types.Object)}
+		if _, err := new(types.Config).Check("p", fset, []*ast.File{file}, info); err != nil {
+			t.Fatal(err)
+		}
+		file = Obfuscate(rand.New(rand.NewSource(seed)), file, info, nil, nil, nil, func(r *rand.Rand, base string) string { return fmt.Sprintf("%s%d", base, r.Uint64()) })
+
+		// Each pointer child is a separate allocation; inline children share
+		// their parent's. Key halves are the only fields with a bare integer.
+		var halves []int
+		allocations := 0
+		var walk func(lit *ast.CompositeLit, allocation int)
+		walk = func(lit *ast.CompositeLit, allocation int) {
+			for _, elt := range lit.Elts {
+				switch value := elt.(*ast.KeyValueExpr).Value.(type) {
+				case *ast.BasicLit:
+					halves = append(halves, allocation)
+				case *ast.UnaryExpr:
+					allocations++
+					walk(value.X.(*ast.CompositeLit), allocations)
+				case *ast.CompositeLit:
+					if _, ok := value.Type.(*ast.Ident); ok {
+						walk(value, allocation)
+					}
+				}
+			}
+		}
+		for _, decl := range file.Decls {
+			if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.VAR {
+				for _, spec := range gen.Specs {
+					for _, value := range spec.(*ast.ValueSpec).Values {
+						if lit, ok := value.(*ast.CompositeLit); ok {
+							allocations++
+							walk(lit, allocations)
+						}
+					}
+				}
+			}
+		}
+		if len(halves) != 2 {
+			t.Fatalf("seed %d: found %d owner key halves, want 2", seed, len(halves))
+		}
+		if halves[0] == halves[1] {
+			failures++
+		}
+	}
+	if failures > 0 {
+		t.Fatalf("%d of 200 owners keep both key halves in one allocation", failures)
+	}
+}

@@ -606,8 +606,10 @@ func (r *obfRand) cipherCall(str bool, plain []byte) *ast.CallExpr {
 	if d.ownerKey == nil {
 		key := newOwnerKey(r.rnd)
 		d.ownerKey = &key
+		// Halves stored side by side would give away the whole key to a
+		// scan of neighboring words, so each gets its own allocation.
 		for i, half := range key {
-			d.ownerKeyPaths[i] = d.HideValue(ah.UintLit(half), ast.NewIdent("uint64"))
+			d.ownerKeyPaths[i] = d.hideApart(ah.UintLit(half), ast.NewIdent("uint64"))
 		}
 	}
 	entry, decoder, result := &d.bytesEntry, r.bytesDecoder, ast.Expr(ah.ByteSliceType())

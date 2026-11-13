@@ -36,6 +36,9 @@ type proxyValue struct {
 	typ, val ast.Expr
 	path     *ast.SelectorExpr
 	clones   []*ast.SelectorExpr
+
+	// apart values of one root never share an allocation; see hideApart.
+	apart bool
 }
 
 type proxyStruct struct {
@@ -107,8 +110,42 @@ func (d *proxyDispatcher) initialize(proxyRoot *proxyRoot, index int) {
 
 	proxyRoot.root = root
 	proxyRoot.flattenStructs = append(flattenStructs, root)
+
+	// Each apart value needs an allocation of its own. The root is one, and
+	// so is every pointer child; inline children belong to their parent's.
+	apartCount, allocations := 0, 1
 	for _, value := range proxyRoot.pending {
-		strct := proxyRoot.flattenStructs[d.rand.Intn(len(proxyRoot.flattenStructs))]
+		if value.apart {
+			apartCount++
+		}
+	}
+	for _, strct := range flattenStructs {
+		if strct.isPointer {
+			allocations++
+		}
+	}
+	for allocations < apartCount {
+		strct := flattenStructs[d.rand.Intn(len(flattenStructs))]
+		if !strct.isPointer {
+			strct.isPointer = true
+			allocations++
+		}
+	}
+	taken := make(map[*proxyStruct]bool)
+	for _, value := range proxyRoot.pending {
+		candidates := proxyRoot.flattenStructs
+		if value.apart {
+			candidates = nil
+			for _, strct := range proxyRoot.flattenStructs {
+				if !taken[allocationOf(strct)] {
+					candidates = append(candidates, strct)
+				}
+			}
+		}
+		strct := candidates[d.rand.Intn(len(candidates))]
+		if value.apart {
+			taken[allocationOf(strct)] = true
+		}
 		strct.values = append(strct.values, value)
 		path := buildPath(strct, value.name)
 		// The caller positioned the placeholder before this subtree existed.
@@ -121,6 +158,15 @@ func (d *proxyDispatcher) initialize(proxyRoot *proxyRoot, index int) {
 		}
 	}
 	proxyRoot.pending = nil
+}
+
+// allocationOf returns the struct whose allocation holds strct: the root, or
+// the nearest pointer child, as inline children are laid out in their parent.
+func allocationOf(strct *proxyStruct) *proxyStruct {
+	for strct.parent != nil && !strct.isPointer {
+		strct = strct.parent
+	}
+	return strct
 }
 
 // buildPath creates an AST expression that represents a field access path
@@ -153,6 +199,17 @@ func cloneProxyPath(expr ast.Expr) ast.Expr {
 }
 
 func (d *proxyDispatcher) HideValue(val, typ ast.Expr) ast.Expr {
+	return d.hideValue(val, typ, false)
+}
+
+// hideApart hides a value which must not share an allocation with any other
+// value hidden apart in the same root, so that the values are never stored
+// next to each other in the binary.
+func (d *proxyDispatcher) hideApart(val, typ ast.Expr) ast.Expr {
+	return d.hideValue(val, typ, true)
+}
+
+func (d *proxyDispatcher) hideValue(val, typ ast.Expr, apart bool) ast.Expr {
 	var root *proxyRoot
 	if len(d.roots) > 0 {
 		root = d.roots[len(d.roots)-1]
@@ -167,10 +224,11 @@ func (d *proxyDispatcher) HideValue(val, typ ast.Expr) ast.Expr {
 	// and field position when the final randomized path is attached.
 	path := &ast.SelectorExpr{X: ast.NewIdent("pendingProxy"), Sel: ast.NewIdent(valueName)}
 	value := &proxyValue{
-		name: valueName,
-		typ:  typ,
-		val:  val,
-		path: path,
+		name:  valueName,
+		typ:   typ,
+		val:   val,
+		path:  path,
+		apart: apart,
 	}
 	root.pending = append(root.pending, value)
 	if d.pendingPaths == nil {
