@@ -42,8 +42,7 @@ func templateIdents(t *testing.T) map[string]bool {
 }
 
 func hiddenObfRand(seed int64) *obfRand {
-	return newObfRand(rand.New(rand.NewSource(seed)), &ast.File{Name: ast.NewIdent("main")},
-		func(_ *rand.Rand, name string) string { return "hidden_" + name })
+	return newObfRand(rand.New(rand.NewSource(seed)), func(_ *rand.Rand, name string) string { return "hidden_" + name })
 }
 
 func TestEmitDecoderNames(t *testing.T) {

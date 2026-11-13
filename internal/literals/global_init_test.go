@@ -106,7 +106,7 @@ func TestGlobalLiteralProxyOwnership(t *testing.T) {
 	for range 100 {
 		long += "an oversized concatenation operand "
 	}
-	long = long[:MaxSize]
+	long = long[:2048]
 	file, err := parser.ParseFile(fset, "global.go", fmt.Sprintf(`package globals
 var early = len([1]string{late})
 var late = "initialized through an unevaluated operand"

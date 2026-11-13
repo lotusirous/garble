@@ -28,7 +28,6 @@ import (
 	"github.com/rogpeppe/go-internal/testscript"
 
 	ah "mvdan.cc/garble/internal/asthelper"
-	"mvdan.cc/garble/internal/literals"
 )
 
 var proxyURL string
@@ -277,6 +276,10 @@ var testRand = mathrand.New(mathrand.NewSource(12345678))
 
 const uniqueLitString = "garble_unique_string"
 
+// generatedLiteralMaxSize was the largest literal the per-literal obfuscators
+// accepted; generated literals stay on both sides of it.
+const generatedLiteralMaxSize = 2 << 10
+
 // generateLiterals creates a source file with random string literals appended
 // to a global var in init, preventing the compiler from optimizing them away.
 func generateLiterals(ts *testscript.TestScript, neg bool, args []string) {
@@ -304,9 +307,9 @@ func generateLiterals(ts *testscript.TestScript, neg bool, args []string) {
 
 	var statements []ast.Stmt
 
-	// 100 literals up to MaxSize, all containing uniqueLitString.
+	// 100 literals up to generatedLiteralMaxSize, all containing uniqueLitString.
 	for range 100 {
-		randSize := testRand.Intn(literals.MaxSize - len(uniqueLitString) + 1)
+		randSize := testRand.Intn(generatedLiteralMaxSize - len(uniqueLitString) + 1)
 		buffer := make([]byte, randSize)
 		testRand.Read(buffer)
 		statements = append(
@@ -319,9 +322,10 @@ func generateLiterals(ts *testscript.TestScript, neg bool, args []string) {
 		)
 	}
 
-	// 5 huge literals past MaxSize exercise the bounded-AST decoder.
+	// 5 huge literals past generatedLiteralMaxSize, the old limit for
+	// per-literal obfuscators, exercise the cipher on large inputs.
 	for range 5 {
-		size := literals.MaxSize + 1 + testRand.Intn(128<<10)
+		size := generatedLiteralMaxSize + 1 + testRand.Intn(128<<10)
 		buffer := make([]byte, size)
 		testRand.Read(buffer)
 		statements = append(

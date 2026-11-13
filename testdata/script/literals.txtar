@@ -329,7 +329,7 @@ var constKeyed = [len(constString)]byte{len(constString) - 1: 1}
 var constArrayLen [len([8]byte{1, 2, 3, 4, 5, 6, 7, 8})]byte
 var constArrayCap [cap(&[8]byte{1, 2, 3, 4, 5, 6, 7, 8})]byte
 
-// Padding to push the concatenation in main above MaxSize.
+// Padding to push the concatenation in main above the old 2 KiB literal limit.
 const padding512 = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
 const padding2048 = padding512 + padding512 + padding512 + padding512
 
@@ -353,7 +353,7 @@ func main() {
 	reassign = "second assign"
 
 	add := "totally long" + "unnecessarily added string"
-	// The folded concatenation uses the large-value decoder as a whole.
+	// The folded concatenation is decoded as a whole.
 	oversize := string("oversize concat secret") + padding2048
 
 	println(cnst, boolean)

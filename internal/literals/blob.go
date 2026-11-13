@@ -5,12 +5,8 @@ package literals
 
 import (
 	"fmt"
-	"go/ast"
-	"go/parser"
 	mathrand "math/rand"
 	"strconv"
-
-	ah "mvdan.cc/garble/internal/asthelper"
 )
 
 // BlobMagic distinguishes encoded embed.FS assets from unselected dependencies.
@@ -30,7 +26,7 @@ func EncodeBlob(rand *mathrand.Rand, plain []byte) []byte {
 	return encoded
 }
 
-// BlobDecodeBody is shared by the literal decoder and the embed.FS overlay.
+// BlobDecodeBody is the decoder body of the embed.FS overlay.
 // Callers supply final names when creating code after identifier typechecking.
 func BlobDecodeBody(input, data, key, index string) string {
 	return fmt.Sprintf(`{
@@ -40,17 +36,4 @@ func BlobDecodeBody(input, data, key, index string) string {
  for %[4]s := range %[2]s { %[2]s[%[4]s] ^= %[3]s[%[4]s %% len(%[3]s)] }
  return %[2]s[:len(%[2]s):len(%[2]s)]
 }`, input, data, key, index, BlobHeaderSize, len(BlobMagic), strconv.Quote(BlobMagic))
-}
-
-type blob struct{}
-
-func (blob) obfuscate(rand *mathrand.Rand, names *generatedNames, data []byte, _ []*externalKey) *ast.BlockStmt {
-	input := names.name("blobInput")
-	source := "func(" + input + " string) []byte " + BlobDecodeBody(input, names.name("blobData"), names.name("blobKey"), names.name("blobIndex"))
-	expr, err := parser.ParseExpr(source)
-	if err != nil {
-		panic(err)
-	}
-	decoder := expr.(*ast.FuncLit)
-	return ah.BlockStmt(ah.AssignDefineStmt(names.ident("data"), ah.CallExpr(decoder, ah.StringLit(string(EncodeBlob(rand, data))))))
 }

@@ -154,8 +154,7 @@ func init() { global += "init literal secret" }
 }
 
 func TestGeneratedLocalNames(t *testing.T) {
-	r := newObfRand(rand.New(rand.NewSource(1)), &ast.File{Name: ast.NewIdent("main")}, func(_ *rand.Rand, name string) string { return "hidden_" + name })
-	names := newGeneratedNames(r)
+	names := newGeneratedNames(hiddenObfRand(1))
 	first := names.ident("data")
 	if first.Name == "data" || names.ident("data").Name != first.Name {
 		t.Fatalf("generated local was not consistently named: %q", first.Name)

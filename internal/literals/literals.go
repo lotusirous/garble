@@ -22,13 +22,6 @@ import (
 // moderate, this also decreases the likelihood for performance slowdowns.
 const MinSize = 8
 
-// MaxSize is the upper limit for the per-byte AST obfuscators.
-const MaxSize = 2 << 10 // 2 KiB
-
-// MaxSizeExpensive is the upper limit for using expensive obfuscators (split, seed).
-// Above this size, only cheap obfuscators are used.
-const MaxSizeExpensive = 256
-
 const (
 	// minStringJunkBytes defines the minimum number of junk bytes to prepend or append during string obfuscation.
 	minStringJunkBytes = 2
@@ -67,11 +60,11 @@ func ObfuscateWithGlobalInits(rand *mathrand.Rand, file *ast.File, info *types.I
 	} else {
 		constructors = ConstructorSummaries([]*ast.File{file}, info, nil)
 	}
-	or := newObfRand(rand, file, nameFunc)
+	or := newObfRand(rand, nameFunc)
 	var globalInits []GlobalInit
 	// Package initializers, including their function literals, keep a shared
 	// dispatcher. Each original function declaration gets a separate tree so
-	// a live function cannot retain another function's lifted decoders.
+	// a live function cannot retain another function's key half.
 	packageDispatcher := or.proxyDispatcher
 	dispatchers := []*proxyDispatcher{packageDispatcher}
 	pre := func(cursor *astutil.Cursor) bool {
@@ -383,7 +376,7 @@ func pureStringInit(expr ast.Expr, info *types.Info) bool {
 }
 
 // The proxy roots are local to the factory, so no unconditional package-level
-// initialization can retain a dead global's decoder or change init dependencies.
+// initialization can retain a dead global's key half or change init dependencies.
 func (r *obfRand) globalLiteralFactory(resultType ast.Expr, value func() ast.Expr) string {
 	name := r.nextLiftedFuncName("literalGlobal")
 	shared := r.proxyDispatcher
@@ -407,12 +400,33 @@ func (r *obfRand) globalLiteralFactory(resultType ast.Expr, value func() ast.Exp
 	return name
 }
 
+type obfRand struct {
+	rnd             *mathrand.Rand
+	nameFunc        NameProviderFunc
+	liftedFuncSeq   int
+	liftedFuncs     []ast.Decl
+	proxyDispatcher *proxyDispatcher
+	stringCalls     map[string]*ast.CallExpr
+
+	// The file's cipher and its decoders, created by the first literal.
+	cipher                      *cipherVariant
+	bytesDecoder, stringDecoder string
+	byteHelpers                 map[byteHelperKey]string
+}
+
+func newObfRand(rand *mathrand.Rand, nameFunc NameProviderFunc) *obfRand {
+	return &obfRand{
+		rnd:             rand,
+		nameFunc:        nameFunc,
+		proxyDispatcher: newProxyDispatcher(rand, nameFunc),
+	}
+}
+
 // generatedNames assigns each decoder-local name before building its AST.
 // References receive fresh Ident nodes with the same generated spelling.
 type generatedNames struct {
-	r      *obfRand
-	names  map[string]string
-	inputs *decoderInputs
+	r     *obfRand
+	names map[string]string
 }
 
 func newGeneratedNames(r *obfRand) *generatedNames {
@@ -430,86 +444,6 @@ func (n *generatedNames) name(original string) string {
 
 func (n *generatedNames) ident(original string) *ast.Ident {
 	return ast.NewIdent(n.name(original))
-}
-
-// liftCall moves a literal decoder out of its owner function and makes it a
-// top-level function. The function value remains hidden in the proxy tree, so
-// calls stay indirect and the compiler cannot inline the decoder back into its
-// owner. Literal-heavy owners therefore no longer accumulate thousands of
-// decoder closures or their inlined bodies.
-func (r *obfRand) liftCall(params *ast.FieldList, resultType ast.Expr, block *ast.BlockStmt, args []ast.Expr) *ast.CallExpr {
-	name := r.nextLiftedFuncName("literalDecoder")
-	results := &ast.FieldList{List: []*ast.Field{{Type: resultType}}}
-	r.liftedFuncs = append(r.liftedFuncs, &ast.FuncDecl{
-		Name: ast.NewIdent(name),
-		Type: &ast.FuncType{
-			Params:  params,
-			Results: results,
-		},
-		Body: block,
-	})
-	hiddenType := &ast.FuncType{
-		Params:  unnamedFieldList(params),
-		Results: unnamedFieldList(results),
-	}
-	callee := r.proxyDispatcher.HideValue(ast.NewIdent(name), hiddenType)
-	return ah.CallExpr(callee, args...)
-}
-
-// liftFuncValue turns a generated function literal into an independently
-// compiled top-level function while still returning it through the proxy
-// dispatcher. In particular, this keeps thousands of []byte-to-string helper
-// bodies out of the proxy root's global initializer; the initializer retains
-// only their function values.
-func (r *obfRand) liftFuncValue(funcVal *ast.FuncLit) ast.Expr {
-	name := r.nextLiftedFuncName("literalHelper")
-	r.liftedFuncs = append(r.liftedFuncs, &ast.FuncDecl{
-		Name: ast.NewIdent(name),
-		Type: funcVal.Type,
-		Body: funcVal.Body,
-	})
-	return ast.NewIdent(name)
-}
-
-func unnamedFieldList(fields *ast.FieldList) *ast.FieldList {
-	if fields == nil {
-		return nil
-	}
-	result := &ast.FieldList{}
-	for _, field := range fields.List {
-		count := max(1, len(field.Names))
-		for range count {
-			result.List = append(result.List, &ast.Field{Type: cloneGeneratedType(field.Type)})
-		}
-	}
-	return result
-}
-
-// cloneGeneratedType copies the small set of type expressions emitted by the
-// literal obfuscator. Keeping the proxy field's function type independent from
-// the lifted declaration avoids sharing AST nodes between two syntax parents.
-func cloneGeneratedType(expr ast.Expr) ast.Expr {
-	switch expr := expr.(type) {
-	case *ast.Ident:
-		return ast.NewIdent(expr.Name)
-	case *ast.BasicLit:
-		return &ast.BasicLit{Kind: expr.Kind, Value: expr.Value}
-	case *ast.ArrayType:
-		var length ast.Expr
-		if expr.Len != nil {
-			length = cloneGeneratedType(expr.Len)
-		}
-		return &ast.ArrayType{Len: length, Elt: cloneGeneratedType(expr.Elt)}
-	case *ast.StarExpr:
-		return &ast.StarExpr{X: cloneGeneratedType(expr.X)}
-	case *ast.FuncType:
-		return &ast.FuncType{
-			Params:  unnamedFieldList(expr.Params),
-			Results: unnamedFieldList(expr.Results),
-		}
-	default:
-		panic(fmt.Sprintf("unsupported generated literal type %T", expr))
-	}
 }
 
 func (r *obfRand) nextLiftedFuncName(base string) string {
@@ -750,43 +684,9 @@ func (d *proxyDispatcher) cloneStringCall(expr ast.Expr) ast.Expr {
 		return ast.NewIdent(expr.Name)
 	case *ast.BasicLit:
 		return &ast.BasicLit{Kind: expr.Kind, Value: expr.Value}
-	case *ast.CompositeLit:
-		elts := make([]ast.Expr, len(expr.Elts))
-		for i, elt := range expr.Elts {
-			elts[i] = d.cloneStringCall(elt)
-		}
-		return &ast.CompositeLit{Type: cloneGeneratedType(expr.Type), Elts: elts}
-	case *ast.ArrayType:
-		return cloneGeneratedType(expr)
 	default:
 		panic(fmt.Sprintf("unsupported string decoder expression %T", expr))
 	}
-}
-
-// stringConversionAdapter shares only within the current owner's dispatcher.
-// Bounds stay in each decoder, so junk and different literal lengths do not
-// require separate conversion functions.
-func (r *obfRand) stringConversionAdapter() (ast.Expr, *ast.FuncType) {
-	d := r.proxyDispatcher
-	if d.stringAdapter == nil {
-		names := newGeneratedNames(r)
-		funcVal := &ast.FuncLit{
-			Type: &ast.FuncType{
-				Params: &ast.FieldList{List: []*ast.Field{
-					ah.Field(ah.ByteSliceType(), names.ident("x")),
-					ah.Field(ast.NewIdent("int"), names.ident("low")),
-					ah.Field(ast.NewIdent("int"), names.ident("high")),
-				}},
-				Results: &ast.FieldList{List: []*ast.Field{{Type: ast.NewIdent("string")}}},
-			},
-			Body: ah.BlockStmt(ah.ReturnStmt(ah.CallExprByName("string", &ast.SliceExpr{
-				X: names.ident("x"), Low: names.ident("low"), High: names.ident("high"),
-			}))),
-		}
-		d.stringAdapterType = cloneGeneratedType(funcVal.Type).(*ast.FuncType)
-		d.stringAdapter = d.HideValue(r.liftFuncValue(funcVal), d.stringAdapterType)
-	}
-	return d.clonePath(d.stringAdapter), d.stringAdapterType
 }
 
 // obfuscateBytes returns a call decoding data to a fresh slice, converted to
@@ -797,19 +697,6 @@ func obfuscateBytes(or *obfRand, isPointer bool, data []byte, arrayLen int64) *a
 		return call
 	}
 	return ah.CallExprByName(or.byteHelper(isPointer, arrayLen), call)
-}
-
-func (or *obfRand) pickObfuscator(size int) obfuscator {
-	if size < MinSize || size > MaxSize {
-		return blob{}
-	}
-	if or.testObfuscator != nil {
-		return or.testObfuscator
-	}
-	if size <= MaxSizeExpensive {
-		return Obfuscators[or.rnd.Intn(len(Obfuscators))]
-	}
-	return CheapObfuscators[or.rnd.Intn(len(CheapObfuscators))]
 }
 
 // isEmbeddedPlaceholder reports whether expr is the initializer that the embed

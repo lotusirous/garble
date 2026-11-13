@@ -45,7 +45,7 @@ func TestLargeLiteral(t *testing.T) {
 }
 
 func TestBlobEncoding(t *testing.T) {
-	for _, size := range []int{0, 1, MinSize - 1, MaxSize, MaxSize + 1, 1 << 20} {
+	for _, size := range []int{0, 1, MinSize - 1, 2048, 2049, 1 << 20} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			plain := bytes.Repeat([]byte{0, 255, 42}, (size+2)/3)[:size]
 			encoded := EncodeBlob(mathrand.New(mathrand.NewSource(123)), plain)

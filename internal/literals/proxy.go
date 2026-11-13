@@ -62,11 +62,6 @@ type proxyDispatcher struct {
 	roots        []*proxyRoot
 	pendingPaths map[*ast.SelectorExpr]*proxyValue
 
-	// Keep the conversion helper within the same retention boundary as its decoders.
-	stringAdapter     ast.Expr
-	stringAdapterType *ast.FuncType
-	sharedDecoder     *sharedDecoder
-
 	// The owner's key half and its decoder entries, each hidden once and
 	// reached through clonePath at every use.
 	ownerKey                *ownerKey

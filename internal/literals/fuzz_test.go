@@ -137,7 +137,7 @@ func FuzzObfuscate(f *testing.F) {
 	f.Add("long_enough_string", initialRandSeed)
 	f.Add("binary_\x00\x01\x02", initialRandSeed)
 	f.Add("whitespace    \n\t\t", initialRandSeed)
-	f.Add(strings.Repeat("x", (2<<10)+1), initialRandSeed) // past MaxSize
+	f.Add(strings.Repeat("x", (2<<10)+1), initialRandSeed) // past the old 2 KiB limit
 	f.Add(strings.Repeat("large_\x00\xff_SECRET_194", 4096), initialRandSeed)
 
 	tdir := f.TempDir()
