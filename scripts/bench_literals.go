@@ -3,32 +3,24 @@
 
 //go:build ignore
 
-// bench_literals benchmarks the build and run-time impact of each literal
-// obfuscator across a range of string sizes.
+// bench_literals benchmarks the build time, run time and binary size of
+// "garble -literals build" against a plain "go build", for one garble checkout.
 //
-// It generates one Go module per string size, each containing many strings of
-// that size. For each obfuscator, it measures:
-//   - Build time: time to "garble -literals build" versus "go build"
-//   - Run time: time to execute the resulting binary (strings are decrypted at init)
-//
-// The garble binary is built with the garble_testing tag to allow forcing a
-// specific obfuscator via GARBLE_TEST_LITERALS_OBFUSCATOR_MAP.
+// It generates these programs:
+//   - sizes: one module per string size, each with many global strings of that size
+//   - hot: a function returning a 32-byte literal, called a million times
+//   - embed: a 1 MiB file embedded as a []byte
 //
 // Each build iteration writes a unique dummy var to bust the build cache
-// without rebuilding the entire runtime. A 5s timeout kills any build or run
+// without rebuilding the entire runtime. A timeout kills any build or run
 // that takes too long, reporting "timeout" on stderr and skipping.
 //
-// Output is in Go benchmark format, compatible with benchstat.
+// Output is in Go benchmark format, compatible with benchstat. To compare two
+// checkouts of garble, such as master and a branch, run once per checkout:
 //
-// Usage: go run ./scripts/bench_literals.go [-count N] [-timeout duration] [-run regexp]
-//
-// Then compare all obfuscators against the go baseline with:
-//
-//	benchstat -col /obf results.txt
-//
-// Or, if you obtained all results but want to show just one:
-//
-//	benchstat -col /obf -filter '/obf:(go OR swap)' out
+//	go run ./scripts/bench_literals.go -garble ../garble-master -label master >master.txt
+//	go run ./scripts/bench_literals.go -label branch >branch.txt
+//	cat master.txt branch.txt | benchstat -col /garble -
 package main
 
 import (
@@ -41,7 +33,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -59,31 +50,25 @@ func init() {
 
 var (
 	count     = flag.Int("count", 1, "number of iterations for each benchmark")
-	timeout   = flag.Duration("timeout", 5*time.Second, "timeout per build or run invocation")
-	runFilter = flag.String("run", "", "regexp to filter which obfuscators to run (always includes go baseline)")
+	timeout   = flag.Duration("timeout", 30*time.Second, "timeout per build or run invocation")
+	garbleDir = flag.String("garble", ".", "garble checkout to build and benchmark")
+	label     = flag.String("label", "new", "value of the /garble benchmark key for this checkout")
 )
 
-// obfuscatorNames maps index to name, matching internal/literals/obfuscators.go.
-var obfuscatorNames = []string{
-	"simple",
-	"swap",
-	"split",
-	"shuffle",
-	"seed",
-}
-
-// stringSizes to benchmark, from just above MinSize (8) to the maxSize limit (2048).
+// stringSizes to benchmark, from just above MinSize (8) to the old 2 KiB limit
+// of the per-literal obfuscators.
 var stringSizes = []int{
 	16, 64, 256, 1024, 2048,
 }
 
+// program is a generated module to benchmark.
+type program struct {
+	name string
+	dir  string
+}
+
 func main() {
 	flag.Parse()
-
-	garbleDir, err := os.Getwd()
-	if err != nil {
-		fatal("getwd: %v", err)
-	}
 
 	tmpDir, err := os.MkdirTemp("", "garble-bench-literals-*")
 	if err != nil {
@@ -91,105 +76,71 @@ func main() {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Build garble with garble_testing tag.
 	garbleBin := filepath.Join(tmpDir, "garble")
-	fmt.Fprintf(os.Stderr, "building garble with garble_testing tag...\n")
-	runCmdNoTimeout(garbleDir, nil, "go", "build", "-tags=garble_testing", "-o", garbleBin, ".")
+	fmt.Fprintf(os.Stderr, "building garble from %s...\n", *garbleDir)
+	runCmdNoTimeout(*garbleDir, "go", "build", "-o", garbleBin, ".")
 
-	// Generate one module per string size.
-	sizeDirs := make(map[int]string)
+	var programs []program
 	for _, size := range stringSizes {
-		dir := filepath.Join(tmpDir, fmt.Sprintf("size_%d", size))
-		must(os.MkdirAll(dir, 0o755))
-		writeTestModule(dir, size)
-		sizeDirs[size] = dir
+		dir := filepath.Join(tmpDir, fmt.Sprintf("size%dB", size))
+		writeModule(dir, sizesMain(size), nil)
+		programs = append(programs, program{fmt.Sprintf("size%dB", size), dir})
 	}
+	hotDir := filepath.Join(tmpDir, "hot")
+	writeModule(hotDir, hotMain(), nil)
+	embedDir := filepath.Join(tmpDir, "embed")
+	writeModule(embedDir, embedMain, map[string]string{"data.txt": randomHex(1 << 20)})
+	programs = append(programs, program{"hot", hotDir}, program{"embed", embedDir})
 
-	// Warm the garble cache by building one program.
-	// Garble caches transformed stdlib, so the first build is much slower.
+	// Garble caches the transformed standard library, so the first build is
+	// much slower than the ones we want to measure.
 	fmt.Fprintf(os.Stderr, "warming garble cache...\n")
-	warmEnv := []string{"GARBLE_TEST_LITERALS_OBFUSCATOR_MAP=main=0"}
-	warmBin := filepath.Join(tmpDir, "warmup_bin")
-	runCmdNoTimeout(sizeDirs[16], warmEnv, garbleBin, "-literals", "build", "-o", warmBin, ".")
+	runCmdNoTimeout(programs[0].dir, garbleBin, "-literals", "build", "-o", filepath.Join(tmpDir, "warmup"), ".")
 
-	// Baseline: go build.
-	for _, size := range stringSizes {
-		bin := filepath.Join(tmpDir, fmt.Sprintf("go_%d_bin", size))
-		benchAndPrint("Build/obf=go", size, sizeDirs[size], nil, "go", "build", "-o", bin, ".")
-	}
-	for _, size := range stringSizes {
-		bin := filepath.Join(tmpDir, fmt.Sprintf("go_%d_bin", size))
-		benchRunAndPrint("Run/obf=go", size, bin)
-	}
-
-	var filterRe *regexp.Regexp
-	if *runFilter != "" {
-		var err error
-		filterRe, err = regexp.Compile(*runFilter)
-		if err != nil {
-			fatal("bad -run regexp: %v", err)
-		}
-	}
-
-	// Each obfuscator.
-	for idx, name := range obfuscatorNames {
-		if filterRe != nil && !filterRe.MatchString(name) {
-			fmt.Fprintf(os.Stderr, "skipping obfuscator %s (filtered by -run)\n", name)
-			continue
-		}
-		env := []string{fmt.Sprintf("GARBLE_TEST_LITERALS_OBFUSCATOR_MAP=main=%d", idx)}
-		for _, size := range stringSizes {
-			bin := filepath.Join(tmpDir, fmt.Sprintf("garble_%s_%d_bin", name, size))
-			benchAndPrint("Build/obf="+name, size, sizeDirs[size], env, garbleBin, "-literals", "build", "-o", bin, ".")
-		}
-		for _, size := range stringSizes {
-			bin := filepath.Join(tmpDir, fmt.Sprintf("garble_%s_%d_bin", name, size))
-			benchRunAndPrint("Run/obf="+name, size, bin)
-		}
+	for _, prog := range programs {
+		bench("go", prog, filepath.Join(tmpDir, prog.name+"_go"), "go", "build")
+		bench(*label, prog, filepath.Join(tmpDir, prog.name+"_garble"), garbleBin, "-literals", "build")
 	}
 }
 
-// benchAndPrint runs the build command *count times, printing one benchstat line per iteration.
-func benchAndPrint(benchName string, size int, dir string, extraEnv []string, args ...string) {
-	name := fmt.Sprintf("Benchmark%s/%dB", benchName, size)
-	timedOut := false
+// bench builds prog *count times with the given command, printing the build
+// time and binary size of each build, then runs the binary *count times.
+func bench(variant string, prog program, bin string, buildArgs ...string) {
+	suffix := fmt.Sprintf("/garble=%s/%s", variant, prog.name)
+	built := false
 	for range *count {
-		if timedOut {
-			break
-		}
-		// Write a unique entrypoint file each iteration to bust the build cache
+		// Write a unique file each iteration to bust the build cache
 		// without rebuilding the entire runtime.
 		entry := fmt.Sprintf("package main\n\nvar _benchIter uint64 = %d\n", rng.Uint64())
-		must(os.WriteFile(filepath.Join(dir, "bench_iter.go"), []byte(entry), 0o644))
+		must(os.WriteFile(filepath.Join(prog.dir, "bench_iter.go"), []byte(entry), 0o644))
 
-		d, ok := runCmdWithTimeout(dir, extraEnv, args[0], args[1:]...)
+		args := append(buildArgs[1:len(buildArgs):len(buildArgs)], "-o", bin, ".")
+		d, ok := runCmdWithTimeout(prog.dir, buildArgs[0], args...)
 		if !ok {
-			fmt.Printf("%s 1 %d ns/op\n", name, timeout.Nanoseconds())
-			fmt.Fprintf(os.Stderr, "    ^ timed out: %s %s\n", args[0], strings.Join(args[1:], " "))
-			timedOut = true
-			continue
+			fmt.Printf("BenchmarkBuild%s 1 %d ns/op\n", suffix, timeout.Nanoseconds())
+			fmt.Fprintf(os.Stderr, "    ^ timed out: %s\n", strings.Join(buildArgs, " "))
+			break
 		}
-		fmt.Printf("%s 1 %d ns/op\n", name, d.Nanoseconds())
+		built = true
+		fmt.Printf("BenchmarkBuild%s 1 %d ns/op\n", suffix, d.Nanoseconds())
+		info, err := os.Stat(bin)
+		must(err)
+		fmt.Printf("BenchmarkSize%s 1 %d bin-bytes\n", suffix, info.Size())
 	}
-}
-
-// benchRunAndPrint runs the binary *count times, printing one benchstat line per iteration.
-func benchRunAndPrint(benchName string, size int, bin string) {
-	name := fmt.Sprintf("Benchmark%s/%dB", benchName, size)
-	if _, err := os.Stat(bin); err != nil {
-		// Binary wasn't built (build timed out).
-		fmt.Printf("%s 1 %d ns/op\n", name, timeout.Nanoseconds())
-		fmt.Fprintf(os.Stderr, "    ^ binary not built (build timed out)\n")
+	if !built {
 		return
 	}
+	// Some systems check a new executable on its first run, such as macOS,
+	// which takes far longer than running it.
+	runCmdWithTimeout("", bin)
 	for range *count {
-		d, ok := runCmdWithTimeout("", nil, bin)
+		d, ok := runCmdWithTimeout("", bin)
 		if !ok {
-			fmt.Printf("%s 1 %d ns/op\n", name, timeout.Nanoseconds())
+			fmt.Printf("BenchmarkRun%s 1 %d ns/op\n", suffix, timeout.Nanoseconds())
 			fmt.Fprintf(os.Stderr, "    ^ timed out: %s\n", bin)
 			return
 		}
-		fmt.Printf("%s 1 %d ns/op\n", name, d.Nanoseconds())
+		fmt.Printf("BenchmarkRun%s 1 %d ns/op\n", suffix, d.Nanoseconds())
 	}
 }
 
@@ -197,7 +148,7 @@ func benchRunAndPrint(benchName string, size int, bin string) {
 // It returns the elapsed time and true on success, or zero and false on timeout.
 // The command is started in its own process group so that on timeout,
 // the entire tree (including child processes like subcompilers) is killed.
-func runCmdWithTimeout(dir string, extraEnv []string, name string, args ...string) (time.Duration, bool) {
+func runCmdWithTimeout(dir string, name string, args ...string) (time.Duration, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
@@ -209,10 +160,7 @@ func runCmdWithTimeout(dir string, extraEnv []string, name string, args ...strin
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Dir = dir
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
@@ -230,12 +178,9 @@ func runCmdWithTimeout(dir string, extraEnv []string, name string, args ...strin
 }
 
 // runCmdNoTimeout runs a command without any timeout (used for setup steps).
-func runCmdNoTimeout(dir string, extraEnv []string, name string, args ...string) {
+func runCmdNoTimeout(dir string, name string, args ...string) {
 	cmd := exec.Command(name, args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Dir = dir
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -248,18 +193,21 @@ func runCmdNoTimeout(dir string, extraEnv []string, name string, args ...string)
 // low enough to keep individual builds fast.
 const numStrings = 20
 
-func writeTestModule(dir string, stringSize int) {
-	goMod := "module test/bench\n\ngo 1.27\n"
-	must(os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0o644))
+func writeModule(dir, mainSource string, files map[string]string) {
+	must(os.MkdirAll(dir, 0o755))
+	must(os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test/bench\n\ngo 1.27\n"), 0o644))
+	must(os.WriteFile(filepath.Join(dir, "main.go"), []byte(mainSource), 0o644))
+	for name, content := range files {
+		must(os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+	}
+}
 
+func sizesMain(stringSize int) string {
 	var b strings.Builder
 	b.WriteString("package main\n\nimport \"os\"\n\n")
-
 	for i := range numStrings {
-		str := randomHex(stringSize)
-		fmt.Fprintf(&b, "var s%d = %q\n", i, str)
+		fmt.Fprintf(&b, "var s%d = %q\n", i, randomHex(stringSize))
 	}
-
 	b.WriteString("\nfunc main() {\n")
 	b.WriteString("\tf, _ := os.Create(os.DevNull)\n")
 	for i := range numStrings {
@@ -267,9 +215,35 @@ func writeTestModule(dir string, stringSize int) {
 	}
 	b.WriteString("\tf.Close()\n")
 	b.WriteString("}\n")
-
-	must(os.WriteFile(filepath.Join(dir, "main.go"), []byte(b.String()), 0o644))
+	return b.String()
 }
+
+// hotMain decodes one literal on every call, as in a hot loop.
+func hotMain() string {
+	return fmt.Sprintf(`package main
+
+var sink int
+
+//go:noinline
+func hot() string { return %q }
+
+func main() {
+	for i := 0; i < 1000000; i++ {
+		sink += len(hot())
+	}
+}
+`, randomHex(32))
+}
+
+const embedMain = `package main
+
+import _ "embed"
+
+//go:embed data.txt
+var data []byte
+
+func main() { println(len(data)) }
+`
 
 func randomHex(n int) string {
 	raw := make([]byte, (n+1)/2)
