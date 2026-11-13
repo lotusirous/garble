@@ -24,13 +24,16 @@ const (
 	// cipherHeaderSize is the literal's key half (16 bytes) plus its nonce (8 bytes).
 	cipherHeaderSize = 24
 
+	// Every round count from minCipherRounds up passes TestCipherAvalanche.
+	// More rounds cost the hot path: a 32-byte string decodes in about 70ns
+	// at 12 rounds and 96ns at 20, against 26ns for the old obfuscators.
 	minCipherRounds = 12
-	maxCipherRounds = 20
+	maxCipherRounds = 14
 
 	// Rotations within two bits of a full turn, in either direction, diffuse
-	// too slowly: TestCipherAvalanche rejects (1, 31) even at maxCipherRounds,
-	// and (31, 2) below 15 rounds. From minRotation up, the worst key bit flips
-	// as many keystream bits at minCipherRounds as at maxCipherRounds.
+	// too slowly: TestCipherAvalanche rejects (1, 31) even at 20 rounds, and
+	// (31, 2) below 15. From minRotation up, the worst key bit flips as many
+	// keystream bits at 12 rounds as at 20.
 	minRotation = 3
 	maxRotation = 32 - minRotation
 )
