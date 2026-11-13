@@ -1,0 +1,107 @@
+From 04fd221fd2644f04cddffeb5440e40cd5d7519cc Mon Sep 17 00:00:00 2001
+From: Kha Nguyen <nguyentrongkha92@gmail.com>
+Date: Fri, 13 Nov 2026 15:09:28 +0700
+Subject: [PATCH] hide the names of shape types in tiny mode
+
+The compiler makes types for generic code, its shapes, and types built from
+them, and stores their names, which spell out struct fields and package
+paths. No value has such a type, so reflect never looks one up by name.
+Replace those names right after dead code elimination, before the type
+descriptors are sorted by name, so reflect's lookups of the other types
+still find them. A leading star stays, as the runtime cuts it off the names
+of some types.
+---
+ cmd/link/internal/ld/main.go | 69 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 69 insertions(+)
+
+diff --git a/cmd/link/internal/ld/main.go b/cmd/link/internal/ld/main.go
+index 19ed197..c0a8a0b 100644
+--- a/cmd/link/internal/ld/main.go
++++ b/cmd/link/internal/ld/main.go
+@@ -48,6 +48,12 @@ import (
+ 	"strings"
+ )
+ 
++import (
++	"encoding/binary"
++
++	"cmd/link/internal/loader"
++)
++
+ var (
+ 	pkglistfornote []byte
+ 	windowsgui     bool // writes a "GUI binary" instead of a "console binary"
+@@ -372,6 +378,7 @@ func Main(arch *sys.Arch, theArch Arch) {
+ 
+ 	bench.Start("deadcode")
+ 	deadcode(ctxt)
++	garbleHideShapeNames(ctxt)
+ 
+ 	bench.Start("linksetup")
+ 	ctxt.linksetup()
+@@ -549,3 +556,65 @@ func startProfile() {
+ 		})
+ 	}
+ }
++
++// garbleHideShapeNames replaces, in tiny mode, the names of the types the
++// compiler makes for generic code, its shapes, and of the types built from
++// them: the names spell out struct fields and package paths. No value has
++// such a type, so reflect never looks one up by name. It runs before the
++// type descriptors are sorted by name, so the lookups of the other types
++// still find them. A leading star stays, as the runtime cuts it off the
++// names of some types.
++func garbleHideShapeNames(ctxt *Link) {
++	if os.Getenv("GARBLE_LINK_TINY") != "true" {
++		return
++	}
++	ldr := ctxt.loader
++	strOff := int32(4*ctxt.Arch.PtrSize + 8) // where decodetypeStr reads the name
++	seen := make(map[loader.Sym]bool)
++	for s := loader.Sym(1); s < loader.Sym(ldr.NSym()); s++ {
++		if !ldr.AttrReachable(s) {
++			continue
++		}
++		if name := ldr.SymName(s); !strings.HasPrefix(name, "type:") || strings.HasPrefix(name, "type:.") {
++			continue
++		}
++		if len(ldr.Data(s)) < commonsize(ctxt.Arch) {
++			continue
++		}
++		relocs := ldr.Relocs(s)
++		r := decodeRelocSym(ldr, s, &relocs, strOff)
++		if r == 0 || seen[r] {
++			continue
++		}
++		seen[r] = true
++		if b := garbleHideShapeName(ldr.Data(r)); b != nil {
++			su := ldr.MakeSymbolUpdater(r)
++			su.SetData(b)
++			su.SetSize(int64(len(b)))
++		}
++	}
++}
++
++// garbleHideShapeName returns the encoded name data with the name of a shape
++// type replaced, or nil to keep it. It keeps any name followed by a tag or a
++// package path, as a type's name never is.
++func garbleHideShapeName(data []byte) []byte {
++	if len(data) < 2 || data[0]&(1<<1|1<<2) != 0 {
++		return nil
++	}
++	n, w := binary.Uvarint(data[1:])
++	if w <= 0 || 1+w+int(n) != len(data) {
++		return nil
++	}
++	name := string(data[1+w:])
++	if !strings.Contains(name, "go.shape.") {
++		return nil
++	}
++	hidden := "_"
++	if strings.HasPrefix(name, "*") {
++		hidden = "*_"
++	}
++	b := []byte{data[0]}
++	b = binary.AppendUvarint(b, uint64(len(hidden)))
++	return append(b, hidden...)
++}

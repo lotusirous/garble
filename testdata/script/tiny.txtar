@@ -17,6 +17,11 @@ exec garble -tiny -seed=AAAAAAAAAAA build
 # its names go. Type arguments spell out struct fields and package paths, so
 # they are stored as "[...]", which is how Go prints them anyway.
 ! binsubstr main$exe 'crypto/internal/fips140/aes.(*CTR).XORKeyStream' '[go.shape.int]).Swap'
+# The types the compiler makes for generic code, its shapes, are stored without
+# their names, which also spell out struct fields and package paths. No value
+# has such a type, so reflect never looks one up; the lookups of the others
+# still find the types the binary has.
+! binsubstr main$exe 'go.shape.'
 ! exec ./main$exe
 stderr '^\(0x[[:xdigit:]]+,0x[[:xdigit:]]+\)' # interfaces/pointers print correctly
 # Tiny binaries have no Go source-file or source-line mappings.
@@ -31,6 +36,7 @@ stderr 'funcExported false funcUnexported true'
 stderr 'funcStructExported false funcStructUnexported true'
 # An exported generic method still has a name.
 stderr '^generic.name [^ ]+\[\.\.\.\]\)\.Swap$'
+stderr '^reflect.lookups true true true true$'
 # The runtime consumes a handful of function names as data even in -tiny:
 # reflect's call stubs keep their exact names so runtime.stkframe.argMapInternal
 # can select their dynamic GC argument maps, value-method wrappers keep a
@@ -326,6 +332,13 @@ func main() {
 
 	checkRuntimeConsumedNames()
 	println("generic.name", pcName(reflect.ValueOf((*pair[int]).Swap).Pointer()))
+	// reflect's constructors find the types the binary has by a binary search
+	// over their names, so these hold only while the table is in name order.
+	println("reflect.lookups",
+		reflect.SliceOf(reflect.TypeOf(pair[int]{})) == reflect.TypeOf([]pair[int](nil)),
+		reflect.PointerTo(reflect.TypeOf([]pair[int](nil))) == reflect.TypeOf(&[]pair[int]{}),
+		reflect.MapOf(reflect.TypeOf(""), reflect.TypeOf(pair[int]{})) == reflect.TypeOf(map[string]pair[int](nil)),
+		reflect.FuncOf([]reflect.Type{reflect.TypeOf(pair[int]{})}, nil, false) == reflect.TypeOf((func(pair[int]))(nil)))
 
 	// Retain fatal paths which Go 1.26 moved into runtime-linked standard
 	// packages, plus SetFinalizer's computed fatal paths. They must be cleaned
