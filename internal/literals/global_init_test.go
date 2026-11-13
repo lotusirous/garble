@@ -101,15 +101,13 @@ func TestConstructorResultTypes(t *testing.T) {
 }
 
 func TestGlobalLiteralProxyOwnership(t *testing.T) {
-	for _, obf := range Obfuscators {
-		t.Run(fmt.Sprintf("%T", obf), func(t *testing.T) {
-			fset := token.NewFileSet()
-			long := ""
-			for range 100 {
-				long += "an oversized concatenation operand "
-			}
-			long = long[:MaxSize]
-			file, err := parser.ParseFile(fset, "global.go", fmt.Sprintf(`package globals
+	fset := token.NewFileSet()
+	long := ""
+	for range 100 {
+		long += "an oversized concatenation operand "
+	}
+	long = long[:MaxSize]
+	file, err := parser.ParseFile(fset, "global.go", fmt.Sprintf(`package globals
 var early = len([1]string{late})
 var late = "initialized through an unevaluated operand"
 type record struct { Text string; Count int; Nested [2]string }
@@ -149,61 +147,56 @@ var indirect = K1.String
 var unknown = indirect("must retain an indirect constructor")
 func effect() string { return "a user call is not pure" }
 `, long, long), 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue), Defs: make(map[*ast.Ident]types.Object), Uses: make(map[*ast.Ident]types.Object), Selections: make(map[*ast.SelectorExpr]*types.Selection)}
-			if _, err := new(types.Config).Check("globals", fset, []*ast.File{file}, info); err != nil {
-				t.Fatal(err)
-			}
-			old := testPkgToObfuscatorMap
-			testPkgToObfuscatorMap = map[string]obfuscator{"globals": obf}
-			defer func() { testPkgToObfuscatorMap = old }()
-			file, inits := ObfuscateWithGlobalInits(rand.New(rand.NewSource(1)), file, info, nil, nil, nil, func(r *rand.Rand, base string) string { return fmt.Sprintf("hidden_%s_%x", base, r.Uint64()) })
-			want := []string{"late", "scalarDead", "scalarLive", "dead", "live", "oversized", "deadMap", "liveMap", "constructor"}
-			if len(inits) != len(want) {
-				t.Fatalf("unexpected certificates: %v", inits)
-			}
-			factories := make(map[string]bool)
-			for i, init := range inits {
-				if init.Global.Name != want[i] || factories[init.Factory] {
-					t.Fatalf("globals lack exclusive certificates: %v", inits)
-				}
-				factories[init.Factory] = true
-			}
-			vars := 0
-			for _, decl := range file.Decls {
-				if decl, ok := decl.(*ast.GenDecl); ok && decl.Tok == token.VAR {
-					vars += len(decl.Specs)
-				}
-			}
-			// Only the uncertified initializers retain package-level proxy roots.
-			if vars != 29 {
-				t.Fatalf("got %d package variables; want 27 globals and two shared roots", vars)
-			}
-			transformed := &types.Info{}
-			if _, err := new(types.Config).Check("globals", fset, []*ast.File{file}, transformed); err != nil {
-				t.Fatal(err)
-			}
-			// len does not evaluate its operand, but late must still precede early.
-			if len(transformed.InitOrder) < 2 || transformed.InitOrder[0].Lhs[0].Name() != "late" || transformed.InitOrder[1].Lhs[0].Name() != "early" {
-				t.Fatalf("unevaluated operand lost its init dependency: %v", transformed.InitOrder)
-			}
-			ast.Inspect(file, func(node ast.Node) bool {
-				if lit, ok := node.(*ast.BasicLit); ok && lit.Kind == token.STRING && lit.Value == fmt.Sprintf("%q", long) {
-					t.Error("oversized concatenation operands lost their obfuscation")
-				}
-				return true
-			})
-			for _, init := range inits {
-				for _, decl := range file.Decls {
-					if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == init.Factory {
-						if len(fn.Body.List) < 2 {
-							t.Fatal("aggregate factory lost its local proxy roots")
-						}
-					}
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue), Defs: make(map[*ast.Ident]types.Object), Uses: make(map[*ast.Ident]types.Object), Selections: make(map[*ast.SelectorExpr]*types.Selection)}
+	if _, err := new(types.Config).Check("globals", fset, []*ast.File{file}, info); err != nil {
+		t.Fatal(err)
+	}
+	file, inits := ObfuscateWithGlobalInits(rand.New(rand.NewSource(1)), file, info, nil, nil, nil, func(r *rand.Rand, base string) string { return fmt.Sprintf("hidden_%s_%x", base, r.Uint64()) })
+	want := []string{"late", "scalarDead", "scalarLive", "dead", "live", "oversized", "deadMap", "liveMap", "constructor"}
+	if len(inits) != len(want) {
+		t.Fatalf("unexpected certificates: %v", inits)
+	}
+	factories := make(map[string]bool)
+	for i, init := range inits {
+		if init.Global.Name != want[i] || factories[init.Factory] {
+			t.Fatalf("globals lack exclusive certificates: %v", inits)
+		}
+		factories[init.Factory] = true
+	}
+	vars := 0
+	for _, decl := range file.Decls {
+		if decl, ok := decl.(*ast.GenDecl); ok && decl.Tok == token.VAR {
+			vars += len(decl.Specs)
+		}
+	}
+	// Only the uncertified initializers retain package-level proxy roots.
+	if vars != 29 {
+		t.Fatalf("got %d package variables; want 27 globals and two shared roots", vars)
+	}
+	transformed := &types.Info{}
+	if _, err := new(types.Config).Check("globals", fset, []*ast.File{file}, transformed); err != nil {
+		t.Fatal(err)
+	}
+	// len does not evaluate its operand, but late must still precede early.
+	if len(transformed.InitOrder) < 2 || transformed.InitOrder[0].Lhs[0].Name() != "late" || transformed.InitOrder[1].Lhs[0].Name() != "early" {
+		t.Fatalf("unevaluated operand lost its init dependency: %v", transformed.InitOrder)
+	}
+	ast.Inspect(file, func(node ast.Node) bool {
+		if lit, ok := node.(*ast.BasicLit); ok && lit.Kind == token.STRING && lit.Value == fmt.Sprintf("%q", long) {
+			t.Error("oversized concatenation operands lost their obfuscation")
+		}
+		return true
+	})
+	for _, init := range inits {
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == init.Factory {
+				if len(fn.Body.List) < 2 {
+					t.Fatal("aggregate factory lost its local proxy roots")
 				}
 			}
-		})
+		}
 	}
 }

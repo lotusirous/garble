@@ -66,6 +66,12 @@ type proxyDispatcher struct {
 	stringAdapter     ast.Expr
 	stringAdapterType *ast.FuncType
 	sharedDecoder     *sharedDecoder
+
+	// The owner's key half and its decoder entries, each hidden once and
+	// reached through clonePath at every use.
+	ownerKey                *ownerKey
+	ownerKeyPaths           [2]ast.Expr
+	bytesEntry, stringEntry ast.Expr
 }
 
 func (d *proxyDispatcher) initialize(proxyRoot *proxyRoot, index int) {

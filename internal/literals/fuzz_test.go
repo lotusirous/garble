@@ -51,6 +51,7 @@ func dead() string { return func() string { return "live literal secret" }() }
 	if err != nil {
 		t.Fatal(err)
 	}
+	live := file.Decls[0].(*ast.FuncDecl)
 	dead := file.Decls[1].(*ast.FuncDecl)
 	originalCount := len(file.Decls)
 	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue), Defs: make(map[*ast.Ident]types.Object), Uses: make(map[*ast.Ident]types.Object)}
@@ -74,29 +75,34 @@ func dead() string { return func() string { return "live literal secret" }() }
 			}
 		}
 	}
-	seen := make(map[string]bool)
-	var decoders []string
-	var roots []string
-	var visit func(ast.Node)
-	visit = func(node ast.Node) {
-		ast.Inspect(node, func(node ast.Node) bool {
-			if id, ok := node.(*ast.Ident); ok && !seen[id.Name] {
-				if decl := generated[id.Name]; decl != nil {
-					seen[id.Name] = true
-					if _, ok := decl.(*ast.FuncDecl); ok {
-						decoders = append(decoders, id.Name)
-					} else {
-						roots = append(roots, id.Name)
+	reachable := func(owner *ast.FuncDecl) map[string]bool {
+		seen := make(map[string]bool)
+		var visit func(ast.Node)
+		visit = func(node ast.Node) {
+			ast.Inspect(node, func(node ast.Node) bool {
+				if id, ok := node.(*ast.Ident); ok && !seen[id.Name] {
+					if decl := generated[id.Name]; decl != nil {
+						seen[id.Name] = true
+						visit(decl)
 					}
-					visit(decl)
 				}
-			}
-			return true
-		})
+				return true
+			})
+		}
+		visit(owner.Body)
+		return seen
 	}
-	visit(dead.Body)
-	if len(decoders) == 0 {
-		t.Fatal("dead function has no generated decoders")
+	// The file's decoder is shared with main; everything holding the dead
+	// owner's keys must go with it.
+	liveDecls := reachable(live)
+	var deadOnly []string
+	for name := range reachable(dead) {
+		if !liveDecls[name] {
+			deadOnly = append(deadOnly, name)
+		}
+	}
+	if len(deadOnly) == 0 {
+		t.Fatal("dead function has no generated declarations of its own")
 	}
 	var text strings.Builder
 	if err := printer.Fprint(&text, fset, file); err != nil {
@@ -117,7 +123,7 @@ func dead() string { return func() string { return "live literal secret" }() }
 	if err != nil {
 		t.Fatalf("nm: %v\n%s", err, out)
 	}
-	for _, name := range append(decoders, roots...) {
+	for _, name := range deadOnly {
 		if strings.Contains(string(out), "main."+name) {
 			t.Errorf("dead owner's generated declaration %s retained in binary", name)
 		}

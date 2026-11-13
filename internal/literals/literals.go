@@ -126,7 +126,7 @@ func ObfuscateWithGlobalInits(rand *mathrand.Rand, file *ast.File, info *types.I
 					continue
 				}
 				expr := ast.Expr(&ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(value)})
-				if len(value) >= MinSize && len(value) <= MaxSize {
+				if len(value) >= MinSize {
 					expr = obfuscateString(or, value)
 				}
 				node.Values[i] = withPos(expr, name.Pos()).(ast.Expr)
@@ -142,7 +142,7 @@ func ObfuscateWithGlobalInits(rand *mathrand.Rand, file *ast.File, info *types.I
 							v := info.Types[e]
 							if v.Type == types.Typ[types.String] && v.Value != nil && v.Value.Kind() == constant.String {
 								size := len(constant.StringVal(v.Value))
-								found = found || size >= MinSize && size <= MaxSize
+								found = found || size >= MinSize
 							}
 						}
 						return true
@@ -173,7 +173,7 @@ func ObfuscateWithGlobalInits(rand *mathrand.Rand, file *ast.File, info *types.I
 							v := info.Types[expr]
 							if v.Type == types.Typ[types.String] && v.Value.Kind() == constant.String {
 								text := constant.StringVal(v.Value)
-								if len(text) >= MinSize && len(text) <= MaxSize {
+								if len(text) >= MinSize {
 									c.Replace(withPos(obfuscateString(or, text), expr.Pos()))
 									return false
 								}
@@ -336,7 +336,7 @@ func pureStringInit(expr ast.Expr, info *types.Info) bool {
 			}
 			if value.Type == types.Typ[types.String] && value.Value.Kind() == constant.String {
 				size := len(constant.StringVal(value.Value))
-				found = found || size >= MinSize && size <= MaxSize
+				found = found || size >= MinSize
 			}
 			return true
 		}
@@ -616,40 +616,122 @@ func obfuscateString(or *obfRand, data string) *ast.CallExpr {
 	if call := or.stringCalls[data]; call != nil {
 		return or.proxyDispatcher.cloneStringCall(call).(*ast.CallExpr)
 	}
-	if or.testObfuscator == nil && len(data) >= MinSize && len(data) <= maxSizeShared {
-		return or.obfuscateSharedString(data)
-	}
-	obf := or.pickObfuscator(len(data))
-
-	// Generate junk bytes to to prepend and append to the data.
-	// This is to prevent the obfuscated string from being easily fingerprintable.
-	junkBytes := make([]byte, or.rnd.Intn(maxStringJunkBytes-minStringJunkBytes)+minStringJunkBytes)
-	or.rnd.Read(junkBytes)
-	splitIdx := or.rnd.Intn(len(junkBytes))
-
-	names := newGeneratedNames(or)
-	extKeys := randExtKeys(or.rnd, names)
-
-	plainData := []byte(data)
-	plainDataWithJunkBytes := append(append(junkBytes[:splitIdx], plainData...), junkBytes[splitIdx:]...)
-
-	block := obf.obfuscate(or.rnd, names, plainDataWithJunkBytes, extKeys)
-	params, args := extKeysToParams(or, extKeys)
-
-	hiddenCastFunc, funcTyp := or.stringConversionAdapter()
-	castParamName := names.name("garbleStringCaster")
-	params.List = append(params.List, &ast.Field{
-		Names: []*ast.Ident{ast.NewIdent(castParamName)},
-		Type:  cloneGeneratedType(funcTyp),
-	})
-	args = append(args, hiddenCastFunc)
-	block.List = append(block.List, ah.ReturnStmt(ah.CallExpr(ast.NewIdent(castParamName), names.ident("data"), ah.IntLit(splitIdx), ah.IntLit(splitIdx+len(plainData)))))
-	call := or.liftCall(params, ast.NewIdent("string"), block, args)
+	call := or.cipherCall(true, []byte(data))
 	if or.stringCalls != nil {
 		or.stringCalls[data] = call
 		return or.proxyDispatcher.cloneStringCall(call).(*ast.CallExpr)
 	}
 	return call
+}
+
+// byteHelperKey identifies a helper converting a decoded slice into the form
+// of the original byte literal.
+type byteHelperKey struct {
+	isPointer bool
+	arrayLen  int64
+}
+
+// decoderFuncType is the type of a hidden decoder entry, which takes the
+// ciphertext, the owner's key half and the bounds of the plaintext.
+func decoderFuncType(result ast.Expr) *ast.FuncType {
+	params := &ast.FieldList{}
+	for _, typ := range []string{"string", "uint64", "uint64", "int", "int"} {
+		params.List = append(params.List, &ast.Field{Type: ast.NewIdent(typ)})
+	}
+	return &ast.FuncType{Params: params, Results: &ast.FieldList{List: []*ast.Field{{Type: result}}}}
+}
+
+// cipherCall encrypts plain under the current owner's key and returns a call
+// decoding it, to a string if str is set and to a fresh byte slice otherwise.
+// Both the decoder and the owner's key half are only reachable through the
+// owner's proxy tree.
+func (r *obfRand) cipherCall(str bool, plain []byte) *ast.CallExpr {
+	if r.cipher == nil {
+		v := newCipherVariant(r.rnd)
+		r.cipher = &v
+		r.bytesDecoder = r.nextLiftedFuncName("literalDecoder")
+		r.liftedFuncs = append(r.liftedFuncs, v.emitDecoder(r.bytesDecoder, newGeneratedNames(r)))
+
+		r.stringDecoder = r.nextLiftedFuncName("literalString")
+		names := newGeneratedNames(r)
+		args := []ast.Expr{names.ident("ct"), names.ident("o0"), names.ident("o1"), names.ident("low"), names.ident("high")}
+		r.liftedFuncs = append(r.liftedFuncs, &ast.FuncDecl{
+			Name: ast.NewIdent(r.stringDecoder),
+			Type: &ast.FuncType{
+				Params: &ast.FieldList{List: []*ast.Field{
+					ah.Field(ast.NewIdent("string"), names.ident("ct")),
+					ah.Field(ast.NewIdent("uint64"), names.ident("o0"), names.ident("o1")),
+					ah.Field(ast.NewIdent("int"), names.ident("low"), names.ident("high")),
+				}},
+				Results: &ast.FieldList{List: []*ast.Field{{Type: ast.NewIdent("string")}}},
+			},
+			Body: ah.BlockStmt(ah.ReturnStmt(ah.CallExprByName("string", ah.CallExpr(ast.NewIdent(r.bytesDecoder), args...)))),
+		})
+	}
+	d := r.proxyDispatcher
+	if d.ownerKey == nil {
+		key := newOwnerKey(r.rnd)
+		d.ownerKey = &key
+		for i, half := range key {
+			d.ownerKeyPaths[i] = d.HideValue(ah.UintLit(half), ast.NewIdent("uint64"))
+		}
+	}
+	entry, decoder, result := &d.bytesEntry, r.bytesDecoder, ast.Expr(ah.ByteSliceType())
+	if str {
+		entry, decoder, result = &d.stringEntry, r.stringDecoder, ast.NewIdent("string")
+	}
+	if *entry == nil {
+		*entry = d.HideValue(ast.NewIdent(decoder), decoderFuncType(result))
+	}
+	ct, low, high := r.cipher.encode(r.rnd, plain, *d.ownerKey)
+	return ah.CallExpr(d.clonePath(*entry), ah.StringLit(ct),
+		d.clonePath(d.ownerKeyPaths[0]), d.clonePath(d.ownerKeyPaths[1]),
+		ah.IntLit(low), ah.IntLit(high))
+}
+
+// byteHelper returns a lifted function converting a decoded slice into a
+// slice pointer, an array, or an array pointer. Helpers are top-level, so a
+// locally shadowed builtin such as copy cannot reach them.
+func (r *obfRand) byteHelper(isPointer bool, arrayLen int64) string {
+	key := byteHelperKey{isPointer: isPointer, arrayLen: arrayLen}
+	if name, ok := r.byteHelpers[key]; ok {
+		return name
+	}
+	name := r.nextLiftedFuncName("literalBytes")
+	names := newGeneratedNames(r)
+	results := &ast.FieldList{}
+	var body *ast.BlockStmt
+	copyStmt := func() ast.Stmt {
+		return ah.ExprStmt(ah.CallExprByName("copy", &ast.SliceExpr{X: names.ident("array")}, names.ident("slice")))
+	}
+	switch {
+	case arrayLen == 0: // func(slice []byte) *[]byte
+		results.List = []*ast.Field{{Type: ah.StarExpr(ah.ByteSliceType())}}
+		body = ah.BlockStmt(ah.ReturnStmt(ah.UnaryExpr(token.AND, names.ident("slice"))))
+	case !isPointer: // func(slice []byte) (array [N]byte)
+		results.List = []*ast.Field{ah.Field(ah.ByteArrayType(arrayLen), names.ident("array"))}
+		body = ah.BlockStmt(copyStmt(), &ast.ReturnStmt{})
+	default: // func(slice []byte) *[N]byte
+		results.List = []*ast.Field{{Type: ah.StarExpr(ah.ByteArrayType(arrayLen))}}
+		body = ah.BlockStmt(
+			ah.AssignDefineStmt(names.ident("array"), ah.CallExprByName("new", ah.ByteArrayType(arrayLen))),
+			copyStmt(),
+			ah.ReturnStmt(names.ident("array")),
+		)
+	}
+	r.liftedFuncs = append(r.liftedFuncs, &ast.FuncDecl{
+		Name: ast.NewIdent(name),
+		Type: &ast.FuncType{
+			Params:  &ast.FieldList{List: []*ast.Field{ah.Field(ah.ByteSliceType(), names.ident("slice"))}},
+			Results: results,
+		},
+		Body: body,
+	})
+	if r.byteHelpers == nil {
+		r.byteHelpers = make(map[byteHelperKey]string)
+	}
+	r.byteHelpers[key] = name
+	return name
 }
 
 // Each use needs independent positions; only the hidden values and decoder are
@@ -707,53 +789,14 @@ func (r *obfRand) stringConversionAdapter() (ast.Expr, *ast.FuncType) {
 	return d.clonePath(d.stringAdapter), d.stringAdapterType
 }
 
-// obfuscateBytes returns a slice decoder when arrayLen is zero, otherwise an array decoder.
+// obfuscateBytes returns a call decoding data to a fresh slice, converted to
+// an array when arrayLen is non-zero and to a pointer when isPointer is set.
 func obfuscateBytes(or *obfRand, isPointer bool, data []byte, arrayLen int64) *ast.CallExpr {
-	obf := or.pickObfuscator(len(data))
-
-	names := newGeneratedNames(or)
-	extKeys := randExtKeys(or.rnd, names)
-	block := obf.obfuscate(or.rnd, names, data, extKeys)
-	params, args := extKeysToParams(or, extKeys)
-
-	var resultType ast.Expr
-	resultName := "data"
-	if arrayLen > 0 {
-		resultType = ah.ByteArrayType(arrayLen)
-		resultName = "newdata"
-		block.List = append(block.List,
-			&ast.DeclStmt{
-				Decl: &ast.GenDecl{
-					Tok: token.VAR,
-					Specs: []ast.Spec{&ast.ValueSpec{
-						Names: []*ast.Ident{names.ident("newdata")},
-						Type:  resultType,
-					}},
-				},
-			},
-			&ast.RangeStmt{
-				Key: names.ident("i"),
-				Tok: token.DEFINE,
-				X:   names.ident("data"),
-				Body: ah.BlockStmt(
-					ah.AssignStmt(
-						ah.IndexExprByExpr(names.ident("newdata"), names.ident("i")),
-						ah.IndexExprByExpr(names.ident("data"), names.ident("i")),
-					),
-				),
-			},
-		)
-	} else {
-		resultType = ah.ByteSliceType()
+	call := or.cipherCall(false, data)
+	if !isPointer && arrayLen == 0 {
+		return call
 	}
-
-	var result ast.Expr = names.ident(resultName)
-	if isPointer {
-		result = ah.UnaryExpr(token.AND, result)
-		resultType = ah.StarExpr(resultType)
-	}
-	block.List = append(block.List, ah.ReturnStmt(result))
-	return or.liftCall(params, resultType, block, args)
+	return ah.CallExprByName(or.byteHelper(isPointer, arrayLen), call)
 }
 
 func (or *obfRand) pickObfuscator(size int) obfuscator {

@@ -265,6 +265,11 @@ type obfRand struct {
 	liftedFuncs     []ast.Decl
 	proxyDispatcher *proxyDispatcher
 	stringCalls     map[string]*ast.CallExpr
+
+	// The file's cipher and its decoders, created by the first literal.
+	cipher                      *cipherVariant
+	bytesDecoder, stringDecoder string
+	byteHelpers                 map[byteHelperKey]string
 }
 
 func newObfRand(rand *mathrand.Rand, file *ast.File, nameFunc NameProviderFunc) *obfRand {
